@@ -17,3 +17,5 @@ graph LR
     C -->|Score <= 80| E[Log & Discard]
     D --> F[Slack/Teams Alert]
     F -.->|Manual Approval| G[Block IP on AWS WAF]
+
+<img width="1446" height="1640" alt="image" src="https://github.com/user-attachments/assets/e1c593af-9bf1-4fc1-8d9d-1b87508962c2" />
