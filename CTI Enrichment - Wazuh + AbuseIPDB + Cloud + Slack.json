@@ -1,0 +1,443 @@
+{
+  "name": "CTI Enrichment - Wazuh + AbuseIPDB + Cloud + Slack",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "wazuh-alert",
+        "responseMode": "responseNode",
+        "options": {}
+      },
+      "id": "4862df68-46e7-4fe0-9569-9dcf101fd752",
+      "name": "01 - Webhook (Wazuh Ingestion)",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [
+        -1104,
+        32
+      ],
+      "webhookId": "b9f2c82e-0e22-43e4-a5b9-f272cb002913",
+      "notes": "STEP 1 - INGESTION\nReceive raw alert payload from Wazuh.\nExpected fields: rule.id, data.srcip, agent.name, rule.description, timestamp"
+    },
+    {
+      "parameters": {
+        "jsCode": "// STEP 2A - PARSE & VALIDATE\n// Extract the suspicious IP from the Wazuh alert payload\n\nconst payload = $input.first().json.body;\n\n// Extract fields from Wazuh alert structure\nconst alertData = {\n  suspiciousIP:   payload?.data?.srcip || payload?.srcip || 'MISSING_IP',\n  agentName:      payload?.agent?.name || 'unknown-agent',\n  ruleid:         payload?.rule?.id || '0',\n  ruleDescription:payload?.rule?.description || 'No description',\n  alertLevel:     payload?.rule?.level || 0,\n  timestamp:      payload?.timestamp || new Date().toISOString()\n};\n\n// Basic IP format validation\nconst ipRegex = /^(\\d{1,3}\\.){3}\\d{1,3}$/;\nif (!ipRegex.test(alertData.suspiciousIP)) {\n  throw new Error(`Invalid IP format: ${alertData.suspiciousIP}`);\n}\n\nreturn [{ json: alertData }];"
+      },
+      "id": "8211b6a9-9e9f-48b7-98ea-482ac9c7cae2",
+      "name": "02 - Parse & Extract IP",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -880,
+        32
+      ],
+      "notes": "STEP 2A - PARSE\nValidates and normalizes the IP from the raw Wazuh payload.\nThrows error if IP is malformed."
+    },
+    {
+      "parameters": {
+        "url": "=https://api.abuseipdb.com/api/v2/check",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendQuery": true,
+        "queryParameters": {
+          "parameters": [
+            {
+              "name": "ipAddress",
+              "value": "={{ $json.suspiciousIP }}"
+            },
+            {
+              "name": "maxAgeInDays",
+              "value": "90"
+            },
+            {
+              "name": "verbose",
+              "value": "true"
+            }
+          ]
+        },
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Key",
+              "value": "={{ $credentials.abuseipdbApiKey }}"
+            },
+            {
+              "name": "Accept",
+              "value": "application/json"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "d01ed23e-aceb-4492-99f4-ae843aea7693",
+      "name": "03 - AbuseIPDB CTI Query",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        -656,
+        32
+      ],
+      "notes": "STEP 2B - CTI ENRICHMENT\nQueries AbuseIPDB for threat intel on the IP.\nReturns: abuseConfidenceScore, totalReports, countryCode, usageType, isp, domain\n\n⚠️ CREDENTIAL REQUIRED: AbuseIPDB API Key\nGet your free key at: https://www.abuseipdb.com/account/api"
+    },
+    {
+      "parameters": {
+        "jsCode": "// STEP 2C - MERGE CTI DATA WITH ORIGINAL ALERT\n// Merge AbuseIPDB response back with the original alert context\n\nconst ctiData = $input.first().json.data;\nconst originalAlert = $('02 - Parse & Extract IP').first().json;\n\nreturn [{\n  json: {\n    // Original alert context\n    suspiciousIP:      originalAlert.suspiciousIP,\n    agentName:         originalAlert.agentName,\n    ruleId:            originalAlert.ruleid,\n    ruleDescription:   originalAlert.ruleDescription,\n    alertLevel:        originalAlert.alertLevel,\n    alertTimestamp:    originalAlert.timestamp,\n\n    // CTI Enrichment from AbuseIPDB\n    abuseScore:        ctiData.abuseConfidenceScore,\n    totalReports:      ctiData.totalReports,\n    countryCode:       ctiData.countryCode,\n    usageType:         ctiData.usageType,\n    isp:               ctiData.isp,\n    domain:            ctiData.domain,\n    isPublic:          ctiData.isPublic,\n    isWhitelisted:     ctiData.isWhitelisted,\n\n    // Derived risk classification\n    riskLevel: ctiData.abuseConfidenceScore >= 80 ? 'CRITICAL' :\n               ctiData.abuseConfidenceScore >= 50 ? 'HIGH' :\n               ctiData.abuseConfidenceScore >= 20 ? 'MEDIUM' : 'LOW'\n  }\n}];"
+      },
+      "id": "d0bf5cc5-643e-4c45-99b1-99f294b8ec4b",
+      "name": "04 - Merge CTI + Alert Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -448,
+        32
+      ],
+      "notes": "STEP 2C - MERGE\nCombines the AbuseIPDB CTI data with the original Wazuh alert.\nCalculates risk classification: CRITICAL / HIGH / MEDIUM / LOW"
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": false,
+            "leftValue": "",
+            "typeValidation": "strict",
+            "version": 1
+          },
+          "conditions": [
+            {
+              "id": "condition_score",
+              "leftValue": "={{ $json.abuseScore }}",
+              "rightValue": 80,
+              "operator": {
+                "type": "number",
+                "operation": "gte"
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "id": "662d39f4-e77c-4067-ac61-0160f49f0119",
+      "name": "05 - Score >= 80? (Risk Gate)",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2,
+      "position": [
+        -224,
+        32
+      ],
+      "notes": "STEP 3 - RISK GATE\nRoutes flow based on abuseConfidenceScore:\n• TRUE (>=80): HIGH RISK path → Cloud verification + urgent alert\n• FALSE (<80): LOW RISK path → Informational log only\n\nThreshold 80 chosen based on AbuseIPDB documentation:\nscores above 80 indicate consistent malicious reporting history."
+    },
+    {
+      "parameters": {
+        "url": "=https://ec2.amazonaws.com/",
+        "authentication": "genericCredentialType",
+        "genericAuthType": "httpHeaderAuth",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "Authorization",
+              "value": "={{ $credentials.awsAuthHeader }}"
+            }
+          ]
+        },
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "Action",
+              "value": "DescribeNetworkInterfaces"
+            },
+            {
+              "name": "Filter.1.Name",
+              "value": "association.public-ip"
+            },
+            {
+              "name": "Filter.1.Value.1",
+              "value": "={{ $json.suspiciousIP }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "e1f9e82d-bd83-46d7-ae0d-5abcc25252f4",
+      "name": "06 - AWS: Check EC2/VPC Interaction",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        0,
+        -96
+      ],
+      "notes": "STEP 3A - CLOUD CONTEXT (HIGH RISK PATH)\nQueries AWS EC2 API to check if the malicious IP\nhas interacted with any VPC Network Interfaces.\n\n⚠️ CREDENTIAL REQUIRED: AWS Access Key + Secret\nNeeded permissions: ec2:DescribeNetworkInterfaces\n\n💡 ALTERNATIVE: Replace with GCP API or Azure equivalent.\nThis node is interchangeable based on your cloud provider."
+    },
+    {
+      "parameters": {
+        "jsCode": "// STEP 3B - PARSE CLOUD CONTEXT RESPONSE\n// Normalize the AWS response and prepare the final enriched payload\n\nconst ctiEnriched = $('04 - Merge CTI + Alert Data').first().json;\n\n// NOTE: AWS API returns XML. In a real implementation,\n// use the AWS n8n node or parse XML with a Set node.\n// This code assumes a pre-parsed JSON response for the skeleton.\nconst awsResponse = $input.first().json;\n\n// Check if any network interfaces were found (IP touched AWS assets)\nconst networkInterfaces = awsResponse?.DescribeNetworkInterfacesResponse\n  ?.networkInterfaceSet?.item || [];\n\nconst affectedAssets = Array.isArray(networkInterfaces)\n  ? networkInterfaces.map(ni => ({\n      interfaceId:  ni.networkInterfaceId,\n      instanceId:   ni.attachment?.instanceId || 'N/A',\n      vpcId:        ni.vpcId,\n      subnetId:     ni.subnetId,\n      privateIp:    ni.privateIpAddress,\n      status:       ni.status\n    }))\n  : [];\n\nreturn [{\n  json: {\n    ...ctiEnriched,\n    cloudProvider:    'AWS',\n    cloudTouched:     affectedAssets.length > 0,\n    affectedAssets:   affectedAssets,\n    assetCount:       affectedAssets.length,\n    escalationNeeded: affectedAssets.length > 0\n  }\n}];"
+      },
+      "id": "c54eb8bc-c285-4650-af3b-69aabb45c70f",
+      "name": "07 - Parse Cloud Context",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        224,
+        -96
+      ],
+      "notes": "STEP 3B - NORMALIZE CLOUD RESPONSE\nParses the AWS API response and identifies\nwhich EC2/VPC assets the malicious IP interacted with.\n\nOutputs:\n• cloudTouched: boolean\n• affectedAssets: list of EC2 instances/interfaces\n• escalationNeeded: true if cloud assets were touched"
+    },
+    {
+      "parameters": {
+        "jsCode": "// STEP 4A - BUILD SLACK MESSAGE (HIGH RISK)\n// Construct a rich, actionable Slack Block Kit message\n\nconst d = $input.first().json;\n\nconst assetList = d.affectedAssets && d.affectedAssets.length > 0\n  ? d.affectedAssets.map(a => `• Instance: *${a.instanceId}* | VPC: ${a.vpcId} | Status: ${a.status}`).join('\\n')\n  : '• No cloud assets directly affected.';\n\nconst message = {\n  channel: '#soc-alerts',\n  username: 'CTI-Bot | n8n SOAR',\n  icon_emoji: ':shield:',\n  blocks: [\n    {\n      type: 'header',\n      text: {\n        type: 'plain_text',\n        text: `🚨 CRITICAL THREAT DETECTED — Score: ${d.abuseScore}/100`,\n        emoji: true\n      }\n    },\n    {\n      type: 'section',\n      fields: [\n        { type: 'mrkdwn', text: `*Suspicious IP:*\\n\\`${d.suspiciousIP}\\`` },\n        { type: 'mrkdwn', text: `*Risk Level:*\\n${d.riskLevel}` },\n        { type: 'mrkdwn', text: `*Abuse Score:*\\n${d.abuseScore}/100` },\n        { type: 'mrkdwn', text: `*Total Reports:*\\n${d.totalReports}` },\n        { type: 'mrkdwn', text: `*Country:*\\n${d.countryCode}` },\n        { type: 'mrkdwn', text: `*ISP/Domain:*\\n${d.isp} / ${d.domain}` },\n        { type: 'mrkdwn', text: `*Usage Type:*\\n${d.usageType}` },\n        { type: 'mrkdwn', text: `*Cloud Assets Touched:*\\n${d.cloudTouched ? '⚠️ YES' : '✅ No'}` }\n      ]\n    },\n    {\n      type: 'section',\n      text: {\n        type: 'mrkdwn',\n        text: `*Wazuh Rule:* [${d.ruleId}] ${d.ruleDescription}\\n*Agent:* ${d.agentName}\\n*Detected at:* ${d.alertTimestamp}`\n      }\n    },\n    {\n      type: 'section',\n      text: {\n        type: 'mrkdwn',\n        text: `*Affected Cloud Assets (${d.assetCount}):*\\n${assetList}`\n      }\n    },\n    {\n      type: 'actions',\n      elements: [\n        {\n          type: 'button',\n          text: { type: 'plain_text', text: '🔴 Block IP on Firewall', emoji: true },\n          style: 'danger',\n          url: `https://YOUR-FIREWALL-CONSOLE/block?ip=${d.suspiciousIP}`,\n          action_id: 'block_ip'\n        },\n        {\n          type: 'button',\n          text: { type: 'plain_text', text: '🔍 View on AbuseIPDB', emoji: true },\n          url: `https://www.abuseipdb.com/check/${d.suspiciousIP}`,\n          action_id: 'view_abuseipdb'\n        },\n        {\n          type: 'button',\n          text: { type: 'plain_text', text: '📋 Open Ticket in JIRA', emoji: true },\n          url: `https://YOUR-JIRA/create?summary=Malicious+IP+${d.suspiciousIP}`,\n          action_id: 'open_ticket'\n        }\n      ]\n    },\n    {\n      type: 'context',\n      elements: [{\n        type: 'mrkdwn',\n        text: `_Automated by CTI-Enrichment-n8n SOAR Pipeline | ${new Date().toISOString()}_`\n      }]\n    }\n  ]\n};\n\nreturn [{ json: message }];"
+      },
+      "id": "88b1ea58-b289-40bf-bdd7-e5cebd5778de",
+      "name": "08 - Build Slack Alert (HIGH RISK)",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        448,
+        -96
+      ],
+      "notes": "STEP 4A - FORMAT ALERT (HIGH RISK)\nBuilds a rich Slack Block Kit message with:\n• Full CTI data from AbuseIPDB\n• Affected cloud assets list\n• One-click action buttons:\n  - Block IP on Firewall\n  - View on AbuseIPDB\n  - Open JIRA ticket\n\n⚠️ CUSTOMIZE: Replace firewall URL and JIRA URL."
+    },
+    {
+      "parameters": {
+        "url": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "=",
+              "value": "={{ $json }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "cf3710ac-da5d-408f-b836-51ef0c8ce0d4",
+      "name": "09 - Send Slack Alert (HIGH RISK)",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        672,
+        -96
+      ],
+      "notes": "STEP 4B - SEND ALERT (HIGH RISK)\nPosts the formatted Block Kit message to Slack.\n\n⚠️ CREDENTIAL REQUIRED: Slack Incoming Webhook URL\nCreate at: https://api.slack.com/apps → Incoming Webhooks\n\n💡 ALTERNATIVE: Replace with Microsoft Teams webhook\nusing the 'Microsoft Teams' n8n node."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"status\": \"processed\", \"riskLevel\": \"{{ $('04 - Merge CTI + Alert Data').first().json.riskLevel }}\", \"ip\": \"{{ $('04 - Merge CTI + Alert Data').first().json.suspiciousIP }}\", \"action\": \"alert_sent_to_slack\"}",
+        "options": {}
+      },
+      "id": "79f86ec2-aa24-4d74-affd-4cacec462e43",
+      "name": "10 - Respond to Wazuh (HIGH RISK)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        880,
+        -96
+      ],
+      "notes": "STEP 5A - WEBHOOK RESPONSE (HIGH RISK)\nReturns HTTP 200 to Wazuh confirming the alert was processed.\nPayload includes risk level and action taken."
+    },
+    {
+      "parameters": {
+        "jsCode": "// STEP 4C - LOG LOW RISK ALERT\n// For low-risk IPs, just log to a less critical channel\n\nconst d = $input.first().json;\n\nreturn [{\n  json: {\n    channel: '#soc-logs',\n    text: `ℹ️ *LOW RISK IP Detected* | IP: \\`${d.suspiciousIP}\\` | Score: ${d.abuseScore}/100 | ISP: ${d.isp} | Country: ${d.countryCode} | Agent: ${d.agentName} | Rule: [${d.ruleId}] | _No action required. Logged for audit._`\n  }\n}];"
+      },
+      "id": "0176caba-cac0-43bc-bb30-5c7379846055",
+      "name": "11 - Log Low Risk Alert",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        0,
+        144
+      ],
+      "notes": "STEP 4C - LOW RISK PATH\nFor IPs with score < 80, sends a lightweight\ninformational log to a secondary Slack channel (#soc-logs).\n\nNo action buttons — purely for audit trail."
+    },
+    {
+      "parameters": {
+        "url": "https://hooks.slack.com/services/YOUR/SLACK/WEBHOOK",
+        "sendBody": true,
+        "bodyParameters": {
+          "parameters": [
+            {
+              "name": "channel",
+              "value": "={{ $json.channel }}"
+            },
+            {
+              "name": "text",
+              "value": "={{ $json.text }}"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "id": "9de0333c-2d5d-479c-a18e-b4ef4ed673cb",
+      "name": "12 - Send Log to #soc-logs",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [
+        224,
+        144
+      ],
+      "notes": "STEP 4D - SEND LOG (LOW RISK PATH)\nPosts informational message to #soc-logs channel.\nSame webhook as the main alert, different channel."
+    },
+    {
+      "parameters": {
+        "respondWith": "json",
+        "responseBody": "={\"status\": \"processed\", \"riskLevel\": \"{{ $('04 - Merge CTI + Alert Data').first().json.riskLevel }}\", \"ip\": \"{{ $('04 - Merge CTI + Alert Data').first().json.suspiciousIP }}\", \"action\": \"logged_only\"}",
+        "options": {}
+      },
+      "id": "16e9d4f0-f665-4c3c-aebc-c7d5eb0f01cf",
+      "name": "13 - Respond to Wazuh (LOW RISK)",
+      "type": "n8n-nodes-base.respondToWebhook",
+      "typeVersion": 1,
+      "position": [
+        448,
+        144
+      ],
+      "notes": "STEP 5B - WEBHOOK RESPONSE (LOW RISK)\nReturns HTTP 200 to Wazuh confirming the alert\nwas received and logged. No escalation triggered."
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "01 - Webhook (Wazuh Ingestion)": {
+      "main": [
+        [
+          {
+            "node": "02 - Parse & Extract IP",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "02 - Parse & Extract IP": {
+      "main": [
+        [
+          {
+            "node": "03 - AbuseIPDB CTI Query",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "03 - AbuseIPDB CTI Query": {
+      "main": [
+        [
+          {
+            "node": "04 - Merge CTI + Alert Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "04 - Merge CTI + Alert Data": {
+      "main": [
+        [
+          {
+            "node": "05 - Score >= 80? (Risk Gate)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "05 - Score >= 80? (Risk Gate)": {
+      "main": [
+        [
+          {
+            "node": "06 - AWS: Check EC2/VPC Interaction",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "11 - Log Low Risk Alert",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "06 - AWS: Check EC2/VPC Interaction": {
+      "main": [
+        [
+          {
+            "node": "07 - Parse Cloud Context",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "07 - Parse Cloud Context": {
+      "main": [
+        [
+          {
+            "node": "08 - Build Slack Alert (HIGH RISK)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "08 - Build Slack Alert (HIGH RISK)": {
+      "main": [
+        [
+          {
+            "node": "09 - Send Slack Alert (HIGH RISK)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "09 - Send Slack Alert (HIGH RISK)": {
+      "main": [
+        [
+          {
+            "node": "10 - Respond to Wazuh (HIGH RISK)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "11 - Log Low Risk Alert": {
+      "main": [
+        [
+          {
+            "node": "12 - Send Log to #soc-logs",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "12 - Send Log to #soc-logs": {
+      "main": [
+        [
+          {
+            "node": "13 - Respond to Wazuh (LOW RISK)",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1",
+    "binaryMode": "separate"
+  },
+  "versionId": "dee4064b-49c7-4ff7-873d-13bc0ef018df",
+  "meta": {
+    "instanceId": "c1f7c3fe8dabb6807abe63b9caa5c1fb49135ada3e516305aa0e1bae69265df1"
+  },
+  "id": "Ppq5XCkr8iMS4905",
+  "tags": []
+}
