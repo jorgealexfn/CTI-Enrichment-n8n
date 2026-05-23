@@ -7,7 +7,7 @@
 ## Overview
 This repository contains a Security Orchestration, Automation, and Response (SOAR) workflow built with **n8n**. It automatically enriches security alerts from SIEM/XDR platforms (like Wazuh) using **AbuseIPDB** for Cyber Threat Intelligence (CTI) and interacts with Cloud APIs (AWS) to provide business context.
 
-> [cite_start]💡 **Development Note:** To optimize development time and scale productivity, LLMs (Gemini/Claude) were used to accelerate the generation of the JSON boilerplate[cite: 242, 243]. [cite_start]This approach allowed for a 100% focus on security architecture and business logic implementation.
+💡 **Development Note:** To optimize development time and scale productivity, LLMs (Gemini/Claude) were used to accelerate the generation of the JSON boilerplate[cite: 242, 243]. [cite_start]This approach allowed for a 100% focus on security architecture and business logic implementation.
 
 ## Architecture
 
